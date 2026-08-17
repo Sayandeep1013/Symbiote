@@ -1,0 +1,9 @@
+{
+  "registryVersion": 1,
+  "mintProject": {
+    "projectId": "zd74bhr83ypnzzr9ar78hvbt0h8cm0c9",
+    "name": "Symbiote Organism"
+  },
+  "assetRoot": "public/assets/mint",
+  "assets": {}
+}
