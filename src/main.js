@@ -6,12 +6,13 @@ import { createMass } from './creature/mass.js';
 import { createWebbing } from './creature/webbing.js';
 import { createStage } from './creature/stage.js';
 import { createShell } from './creature/shell.js';
+import { gooUniforms, updateGooView } from './creature/goo.js';
 
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.3;
+renderer.toneMappingExposure = 1.15;
 renderer.setClearColor(0x000000, 0);
 
 const scene = new THREE.Scene();
@@ -21,21 +22,25 @@ const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerH
 camera.position.set(0, 0.55, 7.6);
 camera.lookAt(0, -0.1, 0);
 
-// Wet black: almost no diffuse, a slightly rough base reflection under a
-// mirror-sharp clearcoat. Both layers reflect the strip-light studio, which
-// gives a soft sheen plus a crisp streak on every edge.
+// Goo black: almost no diffuse, a base reflection under a liquid clearcoat.
+// The goo patch (goo.js) varies both per pixel - wet patches with a sharp
+// coat, satin ones with a dull one - and bumps the surface, so highlights
+// break up instead of reading as black chrome
 function wetBlack() {
   return new THREE.MeshPhysicalMaterial({
-    color: 0x030304,
-    roughness: 0.22,
+    color: 0x040405,
+    roughness: 0.4,
     metalness: 0.0,
     clearcoat: 1.0,
-    clearcoatRoughness: 0.03,
-    envMapIntensity: 1.0,
-    iridescence: 0.15,
+    clearcoatRoughness: 0.1,
+    envMapIntensity: 0.8,
+    iridescence: 0.12,
     iridescenceIOR: 1.25,
   });
 }
+const goo = gooUniforms({ rough: [0.3, 0.68], coat: [1.0, 0.18], coatRough: [0.05, 0.34], wet: 0.1 });
+// the films are thinner and drier
+const gooFilm = gooUniforms({ rough: [0.4, 0.75], coat: [0.7, 0.1], coatRough: [0.12, 0.4], wet: 0.15 });
 
 const stage = createStage();
 scene.add(stage.mesh);
@@ -44,14 +49,16 @@ const creature = new THREE.Group();
 scene.add(creature);
 
 const rig = createRig();
-const tubes = createTubes(rig.tendrils.length, wetBlack());
+// tendrils first, then the pool of goo strings, one tube instance each
+const strands = rig.tendrils.concat(rig.strings.items);
+const tubes = createTubes(strands.length, wetBlack(), goo);
 creature.add(tubes.mesh);
 
 // the fused mass: body, roots, forks and merges as one implicit surface. Its
 // big smooth lobes catch every strip at once, so it's kept a little darker
 const massMaterial = wetBlack();
-massMaterial.envMapIntensity = 0.6;
-const mass = createMass(rig, massMaterial);
+massMaterial.envMapIntensity = 1.0;
+const mass = createMass(rig, massMaterial, goo);
 creature.add(mass.mesh);
 
 // thin films are nearly flat, so a mirror coat reflects whole light strips as
@@ -70,21 +77,43 @@ const webMaterial = wetFilm();
 webMaterial.envMapIntensity = 0.28;
 webMaterial.clearcoat = 0.6;
 webMaterial.clearcoatRoughness = 0.22;
-const webbing = createWebbing(rig.pairs, tubes.posTex, webMaterial);
+const webbing = createWebbing(rig.pairs, tubes.posTex, webMaterial, gooFilm);
 creature.add(webbing.mesh);
 
-const shell = createShell(wetFilm());
+const shell = createShell(wetFilm(), gooFilm);
 creature.add(shell.mesh);
 
+// the mass hides most of everything else: draw it first so the GPU can skip
+// shading what's behind it (all of these sit at the same origin, so the
+// default distance sort can't tell them apart)
+mass.mesh.renderOrder = 0;
+tubes.mesh.renderOrder = 1;
+shell.mesh.renderOrder = 2;
+webbing.mesh.renderOrder = 3;
+
 rig.tendrils.forEach((t, i) => {
-  tubes.shape[i * 4] = t.r0;
-  tubes.shape[i * 4 + 1] = t.r1;
-  tubes.shape[i * 4 + 2] = t.taper;
-  tubes.shape[i * 4 + 3] = t.flat;
-  tubes.extra[i * 2] = t.seed;
-  tubes.extra[i * 2 + 1] = t.bulge;
+  tubes.shape.set([t.r0, t.r1, t.taper, t.flat], i * 4);
+  tubes.extra.set([t.seed, t.bulge, t.len, 0], i * 4);
+  tubes.goo.set([t.pulse, 0, 0, 0], i * 4);
 });
 tubes.commit();
+
+// strings change shape every frame: radii from their stretch, beads
+function uploadStrings() {
+  const base = rig.tendrils.length;
+  rig.strings.items.forEach((it, j) => {
+    const i = (base + j) * 4;
+    if (!it.active) {
+      tubes.shape.fill(0, i, i + 4);
+      tubes.goo.fill(0, i, i + 4);
+      return;
+    }
+    tubes.shape.set([it.rA, it.rB, 1, 1], i);
+    tubes.extra.set([it.seed, 0, it.len, 1], i);
+    tubes.goo.set([0, it.rMid, it.bead, it.nBeads], i);
+  });
+  tubes.commit();
+}
 
 // spines -> textures, with a rotation-minimising frame so the flattened
 // cross-sections twist smoothly instead of flipping
@@ -93,7 +122,7 @@ const nrm = new THREE.Vector3();
 function uploadSpines() {
   const P = tubes.posData;
   const N = tubes.nrmData;
-  rig.tendrils.forEach((t, row) => {
+  strands.forEach((t, row) => {
     const pts = t.pts;
     for (let k = 0; k < SEGS; k++) {
       const a = pts[Math.max(0, k - 1)];
@@ -110,7 +139,6 @@ function uploadSpines() {
       N[o + 2] = nrm.z;
     }
   });
-  tubes.upload();
 }
 
 function resize() {
@@ -172,11 +200,22 @@ function animate() {
   updateCursor(dt);
   rig.update(dt, time, cursor);
   uploadSpines();
+  uploadStrings();
+  tubes.upload(time);
   mass.update(time);
+  webbing.update();
   shell.update(time);
+  goo.uGooTime.value = time;
+  gooFilm.uGooTime.value = time;
+  creature.updateMatrixWorld();
+  camera.updateMatrixWorld();
+  updateGooView([goo, gooFilm], camera, creature);
   stage.update(time);
 
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
+
+// dev-only handle for tuning from the console; stripped from production builds
+if (import.meta.env.DEV) window.__sym = { renderer, scene, camera, rig, goo, gooFilm, tubes, mass, webbing, shell, creature };

@@ -90,6 +90,41 @@ function stampBody(time) {
   }
 }
 
+// trilinear field lookup at a point in the polygonizer's [-1, 1] space
+function sampleField(x, y, z) {
+  const gx = x * half + half, gy = y * half + half, gz = z * half + half;
+  if (gx < 0 || gy < 0 || gz < 0 || gx >= size - 1 || gy >= size - 1 || gz >= size - 1) return 0;
+  const ix = gx | 0, iy = gy | 0, iz = gz | 0;
+  const fx = gx - ix, fy = gy - iy, fz = gz - iz;
+  const i = iz * size2 + iy * size + ix;
+  const c00 = field[i] + (field[i + 1] - field[i]) * fx;
+  const c10 = field[i + size] + (field[i + size + 1] - field[i + size]) * fx;
+  const c01 = field[i + size2] + (field[i + size2 + 1] - field[i + size2]) * fx;
+  const c11 = field[i + size2 + size] + (field[i + size2 + size + 1] - field[i + size2 + size]) * fx;
+  const c0 = c00 + (c10 - c00) * fy;
+  const c1 = c01 + (c11 - c01) * fy;
+  return c0 + (c1 - c0) * fz;
+}
+
+// Cavity occlusion straight from the density field: step out along the
+// normal and see how much goo is still there. On an open lobe the field
+// falls away fast; in a fold, a crotch or between fused strands it stays high
+const AO_NEAR = 0.06 / HALF;
+const AO_FAR = 0.16 / HALF;
+function occlusion(positions, normals, count, out) {
+  for (let v = 0; v < count; v++) {
+    const o = v * 3;
+    let nx = normals[o], ny = normals[o + 1], nz = normals[o + 2];
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl; ny /= nl; nz /= nl;
+    const px = positions[o], py = positions[o + 1], pz = positions[o + 2];
+    const near = sampleField(px + nx * AO_NEAR, py + ny * AO_NEAR, pz + nz * AO_NEAR) / ISO;
+    const far = sampleField(px + nx * AO_FAR, py + ny * AO_FAR, pz + nz * AO_FAR) / ISO;
+    const occ = Math.min(1, Math.max(0, (near - 0.45) / 0.5)) * 0.5 + Math.min(1, Math.max(0, (far - 0.15) / 0.5)) * 0.5;
+    out[v] = 1 - 0.9 * occ;
+  }
+}
+
 self.onmessage = (e) => {
   const { segs, strandEnds, time } = e.data;
   field.fill(0);
@@ -111,9 +146,12 @@ self.onmessage = (e) => {
   const n = mc.count * 3;
   const positions = mc.positionArray.slice(0, n);
   const normals = mc.normalArray.slice(0, n);
-  self.postMessage({ positions, normals, count: mc.count, segs, strandEnds }, [
+  const ao = new Float32Array(mc.count);
+  occlusion(positions, normals, mc.count, ao);
+  self.postMessage({ positions, normals, ao, count: mc.count, segs, strandEnds }, [
     positions.buffer,
     normals.buffer,
+    ao.buffer,
     segs.buffer,
     strandEnds.buffer,
   ]);

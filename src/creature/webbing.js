@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SEGS } from './tubes.js';
 import { SNOISE } from './noise.js';
+import { GOO_VERTEX_PARS, patchGoo } from './goo.js';
 
 // Membranes stretched between the bases of neighbouring arms, like the
 // webbing in a splash crown. They read the same spine texture as the tubes,
@@ -11,7 +12,7 @@ import { SNOISE } from './noise.js';
 const U_SEGS = 24;
 const V_SEGS = 24;
 
-export function createWebbing(pairs, posTex, material) {
+export function createWebbing(pairs, posTex, material, gooU) {
   const verts = (U_SEGS + 1) * (V_SEGS + 1);
   const grid = new Float32Array(verts * 2);
   let n = 0;
@@ -44,7 +45,11 @@ export function createWebbing(pairs, posTex, material) {
     pairData.set([p.a, p.b, p.start, p.reach], i * 4);
     seedData[i] = Math.random() * 50;
   });
-  geo.setAttribute('aPair', new THREE.InstancedBufferAttribute(pairData, 4));
+  // start/reach change at runtime: a sticky film stretches further up the
+  // arms while they pull apart
+  const pairAttr = new THREE.InstancedBufferAttribute(pairData, 4);
+  pairAttr.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('aPair', pairAttr);
   geo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seedData, 1));
 
   const SPINE = `
@@ -76,8 +81,10 @@ vec3 webPos(vec2 w){
   material.side = THREE.DoubleSide;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uSpinePos = { value: posTex };
+    patchGoo(shader, gooU);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
+${GOO_VERTEX_PARS}
 uniform sampler2D uSpinePos;
 attribute vec2 aWeb;
 attribute vec4 aPair;
@@ -98,6 +105,15 @@ vec3 objectNormal = dot(wN, wN) > 1e-12 ? normalize(wN) : normalize(wP);
 vWeb = aWeb;
 vWebObj = wP;
 vSeed = aSeed;
+vGoo = wP * 6.0 + aSeed;
+vGooJ0 = vec3(6.0, 0.0, 0.0);
+vGooJ1 = vec3(0.0, 6.0, 0.0);
+vGooJ2 = vec3(0.0, 0.0, 6.0);
+// thin films: the holes are their texture, a bump on top is not worth its cost
+vGooAmp = 0.0;
+vGooDry = gooDryAt(vGoo);
+// films sit in the crotches between arms: partly shut in
+vGooAO = 0.75;
 `)
       .replace('#include <begin_vertex>', 'vec3 transformed = wP;');
 
@@ -122,5 +138,14 @@ if (holes > thr) discard;
 
   const mesh = new THREE.Mesh(geo, material);
   mesh.frustumCulled = false;
-  return { mesh };
+  return {
+    mesh,
+    update() {
+      pairs.forEach((p, i) => {
+        pairData[i * 4 + 2] = p.start;
+        pairData[i * 4 + 3] = p.reach;
+      });
+      pairAttr.needsUpdate = true;
+    },
+  };
 }
