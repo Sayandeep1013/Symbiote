@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BODY_R } from './rig.js';
-import { SNOISE } from './body.js';
+import { SNOISE } from './noise.js';
 
 // A torn film of goo wrapped loosely around the core. Big noise-driven holes
 // open into the darker body underneath, and every hole has a glossy rim:

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { createStudioEnvironment } from './creature/env.js';
 import { createTubes, SEGS } from './creature/tubes.js';
 import { createRig } from './creature/rig.js';
-import { createBody } from './creature/body.js';
+import { createMass } from './creature/mass.js';
 import { createWebbing } from './creature/webbing.js';
 import { createStage } from './creature/stage.js';
 import { createShell } from './creature/shell.js';
@@ -18,7 +18,7 @@ const scene = new THREE.Scene();
 scene.environment = createStudioEnvironment(renderer);
 
 const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 50);
-camera.position.set(0, 0.6, 8.8);
+camera.position.set(0, 0.55, 7.6);
 camera.lookAt(0, -0.1, 0);
 
 // Wet black: almost no diffuse, a slightly rough base reflection under a
@@ -47,12 +47,12 @@ const rig = createRig();
 const tubes = createTubes(rig.tendrils.length, wetBlack());
 creature.add(tubes.mesh);
 
-// the core is big smooth lobes that catch every strip at once; keep it
-// darker so it reads as a deep black mass under the brighter strands
-const bodyMaterial = wetBlack();
-bodyMaterial.envMapIntensity = 0.35;
-const body = createBody(bodyMaterial);
-creature.add(body.mesh);
+// the fused mass: body, roots, forks and merges as one implicit surface. Its
+// big smooth lobes catch every strip at once, so it's kept a little darker
+const massMaterial = wetBlack();
+massMaterial.envMapIntensity = 0.6;
+const mass = createMass(rig, massMaterial);
+creature.add(mass.mesh);
 
 // thin films are nearly flat, so a mirror coat reflects whole light strips as
 // white blocks; a slightly softer coat keeps them as streaks
@@ -172,7 +172,7 @@ function animate() {
   updateCursor(dt);
   rig.update(dt, time, cursor);
   uploadSpines();
-  body.update(time);
+  mass.update(time);
   shell.update(time);
   stage.update(time);
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { SEGS } from './tubes.js';
-import { SNOISE } from './body.js';
+import { SNOISE } from './noise.js';
 
 // Membranes stretched between the bases of neighbouring arms, like the
 // webbing in a splash crown. They read the same spine texture as the tubes,

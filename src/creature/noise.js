@@ -1,7 +1,4 @@
-import * as THREE from 'three';
-import { BODY_R } from './rig.js';
-
-// simplex noise (Ashima Arts / Ian McEwan, MIT)
+// GLSL simplex noise (Ashima Arts / Ian McEwan, MIT), shared by the film shaders
 export const SNOISE = `
 vec3 mod289(vec3 x){ return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 mod289(vec4 x){ return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -49,44 +46,3 @@ float snoise(vec3 v){
   m = m * m;
   return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
 }`;
-
-export function createBody(material) {
-  const geo = new THREE.IcosahedronGeometry(BODY_R, 48);
-  const uniforms = { uTime: { value: 0 } };
-
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = uniforms.uTime;
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', `#include <common>
-uniform float uTime;
-${SNOISE}
-// big slow glossy lobes; fine detail comes from the strands, not the surface
-float bodyField(vec3 d){
-  float big = snoise(d * 1.4 + vec3(0.0, uTime * 0.12, 0.0));
-  float mid = snoise(d * 3.0 - vec3(uTime * 0.2, 0.0, uTime * 0.1));
-  return big * 0.16 + mid * 0.05;
-}
-vec3 bodyPos(vec3 d){ return d * (${BODY_R.toFixed(3)} * (1.0 + bodyField(d))); }
-`)
-      .replace('#include <beginnormal_vertex>', `
-vec3 bDir = normalize(position);
-vec3 bT = normalize(cross(bDir, abs(bDir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-vec3 bB = cross(bDir, bT);
-float bE = 0.01;
-vec3 bP = bodyPos(bDir);
-vec3 bPT = bodyPos(normalize(bDir + bT * bE));
-vec3 bPB = bodyPos(normalize(bDir + bB * bE));
-vec3 objectNormal = normalize(cross(bPT - bP, bPB - bP));
-`)
-      .replace('#include <begin_vertex>', 'vec3 transformed = bP;');
-  };
-  material.customProgramCacheKey = () => 'symbiote-body';
-
-  const mesh = new THREE.Mesh(geo, material);
-  return {
-    mesh,
-    update(time) {
-      uniforms.uTime.value = time;
-    },
-  };
-}
