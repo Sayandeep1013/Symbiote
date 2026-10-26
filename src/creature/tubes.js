@@ -1,16 +1,22 @@
 import * as THREE from 'three';
+import { GOO_VERTEX_PARS, patchGoo } from './goo.js';
 
 // Every tendril, branch, fibre and spike is one instance of the same template
 // tube. Its spine (SEGS points + a reference normal per point) lives in a row
 // of two float textures that the CPU rig rewrites each frame; the vertex
 // shader bends the template along that spine with a Catmull-Rom curve.
 // This keeps hundreds of strands to one draw call.
+//
+// Two radius profiles:
+//   0 tendril  - tapers from r0 to r1, with bulges travelling outward
+//   1 string   - a stretched bridge of goo: blobs where it's attached at each
+//                end (r0, r1), a thin middle (rMid) and beads along it
 
 export const SEGS = 20;
 const RINGS = 40;
 const RADIAL = 10;
 
-export function createTubes(count, material) {
+export function createTubes(count, material, gooU) {
   // template: (t along the strand 0..1, angle around it)
   const verts = RINGS * (RADIAL + 1);
   const tube = new Float32Array(verts * 2);
@@ -42,11 +48,19 @@ export function createTubes(count, material) {
   for (let i = 0; i < count; i++) row[i] = i;
   // x: root radius, y: tip radius, z: taper exponent, w: cross-section flatness
   const shape = new Float32Array(count * 4);
-  // x: seed, y: bulge amount
-  const extra = new Float32Array(count * 2);
+  // x: seed, y: bulge amount, z: length, w: profile
+  const extra = new Float32Array(count * 4);
+  // x: travelling-bulge speed; strings only: y: middle radius, z: bead
+  // radius, w: bead count
+  const goo = new Float32Array(count * 4);
   geo.setAttribute('aRow', new THREE.InstancedBufferAttribute(row, 1));
-  geo.setAttribute('aShape', new THREE.InstancedBufferAttribute(shape, 4));
-  geo.setAttribute('aExtra', new THREE.InstancedBufferAttribute(extra, 2));
+  const shapeAttr = new THREE.InstancedBufferAttribute(shape, 4);
+  const extraAttr = new THREE.InstancedBufferAttribute(extra, 4);
+  const gooAttr = new THREE.InstancedBufferAttribute(goo, 4);
+  for (const a of [shapeAttr, extraAttr, gooAttr]) a.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('aShape', shapeAttr);
+  geo.setAttribute('aExtra', extraAttr);
+  geo.setAttribute('aGoo', gooAttr);
 
   const posData = new Float32Array(SEGS * count * 4);
   const nrmData = new Float32Array(SEGS * count * 4);
@@ -58,18 +72,23 @@ export function createTubes(count, material) {
   const uniforms = {
     uSpinePos: { value: posTex },
     uSpineNrm: { value: nrmTex },
+    uTime: { value: 0 },
   };
 
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, uniforms);
+    patchGoo(shader, gooU);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
+${GOO_VERTEX_PARS}
 uniform sampler2D uSpinePos;
 uniform sampler2D uSpineNrm;
+uniform float uTime;
 attribute vec2 aTube;
 attribute float aRow;
 attribute vec4 aShape;
-attribute vec2 aExtra;
+attribute vec4 aExtra;
+attribute vec4 aGoo;
 
 vec3 spineP(int i, int row){ return texelFetch(uSpinePos, ivec2(clamp(i, 0, ${SEGS - 1}), row), 0).xyz; }
 vec3 spineN(int i, int row){ return texelFetch(uSpineNrm, ivec2(clamp(i, 0, ${SEGS - 1}), row), 0).xyz; }
@@ -95,13 +114,36 @@ vec3 sRef = mix(spineN(sI, sRow), spineN(sI + 1, sRow), sU);
 vec3 sNrm = normalize(sRef - sTan * dot(sRef, sTan) + 1e-6);
 vec3 sBin = cross(sTan, sNrm);
 
-// taper, plus slow lumps along the length so strands aren't machined cones
-float sR = mix(aShape.x, aShape.y, pow(sT, aShape.z));
-sR *= 1.0 + aExtra.y * sin(sT * 19.0 + aExtra.x * 7.0) * (1.0 - sT);
+float sLen = aExtra.z;
+float sR;
+if (aExtra.w < 0.5) {
+  // taper, plus bulges travelling outward along it (peristalsis) so strands
+  // aren't machined cones. Mirrored by radiusAt() in rig.js for the mass
+  sR = mix(aShape.x, aShape.y, pow(sT, aShape.z));
+  sR *= 1.0 + aExtra.y * sin(sT * 19.0 + aExtra.x * 7.0 - uTime * aGoo.x) * (1.0 - sT);
+} else {
+  // a goo string: blobs at the attached ends, a thin middle, beads
+  float e0 = exp(-sT * sLen / max(aShape.x * 2.5, 1e-4));
+  float e1 = exp(-(1.0 - sT) * sLen / max(aShape.y * 2.5, 1e-4));
+  sR = aGoo.y + (aShape.x - aGoo.y) * e0 + (aShape.y - aGoo.y) * e1;
+  sR += aGoo.z * pow(max(0.0, sin(sT * aGoo.w * PI)), 8.0);
+}
 float sA = aTube.y;
 float sFlat = aShape.w;
 vec3 tubePos = sPos + sNrm * cos(sA) * sR + sBin * sin(sA) * sR * sFlat;
 vec3 objectNormal = normalize(sNrm * cos(sA) * sFlat + sBin * sin(sA));
+
+// goo pattern: stretched along the strand (fibrous grooves that run with it),
+// tight around it; bump height follows the radius so thin threads stay smooth
+const float GOO_FA = 18.0;
+const float GOO_FR = 26.0;
+vGoo = vec3(sT * sLen * GOO_FA, cos(sA) * sR * GOO_FR, sin(sA) * sR * GOO_FR) + aExtra.x * vec3(1.3, 0.7, 0.9);
+vGooJ0 = sTan * GOO_FA;
+vGooJ1 = sNrm * GOO_FR;
+vGooJ2 = sBin * (GOO_FR / max(sFlat, 0.3));
+vGooAmp = min(0.0055, sR * 0.06);
+vGooAO = aExtra.w < 0.5 ? mix(0.6, 1.0, smoothstep(0.0, 0.3, sT)) : 1.0;
+vGooDry = gooDryAt(vec3(vGoo.x, aExtra.x, 0.0));
 #ifdef USE_TANGENT
   vec3 objectTangent = sTan;
 #endif
@@ -118,13 +160,16 @@ vec3 objectNormal = normalize(sNrm * cos(sA) * sFlat + sBin * sin(sA));
     posTex,
     shape,
     extra,
+    goo,
     posData,
     nrmData,
     commit() {
-      geo.attributes.aShape.needsUpdate = true;
-      geo.attributes.aExtra.needsUpdate = true;
+      shapeAttr.needsUpdate = true;
+      extraAttr.needsUpdate = true;
+      gooAttr.needsUpdate = true;
     },
-    upload() {
+    upload(time) {
+      uniforms.uTime.value = time;
       posTex.needsUpdate = true;
       nrmTex.needsUpdate = true;
     },

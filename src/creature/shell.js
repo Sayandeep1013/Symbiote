@@ -1,20 +1,23 @@
 import * as THREE from 'three';
 import { BODY_R } from './rig.js';
 import { SNOISE } from './noise.js';
+import { GOO_VERTEX_PARS, patchGoo } from './goo.js';
 
 // A torn film of goo wrapped loosely around the core. Big noise-driven holes
 // open into the darker body underneath, and every hole has a glossy rim:
 // that's the "liquid mass with cavities" in the reference, which a solid
 // lumpy sphere can't give.
-export function createShell(material) {
+export function createShell(material, gooU) {
   const geo = new THREE.IcosahedronGeometry(BODY_R * 1.12, 40);
   const uniforms = { uTime: { value: 0 } };
 
   material.side = THREE.DoubleSide;
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = uniforms.uTime;
+    patchGoo(shader, gooU);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
+${GOO_VERTEX_PARS}
 uniform float uTime;
 varying vec3 vShellDir;
 ${SNOISE}
@@ -30,6 +33,14 @@ vec3 shB = cross(shD, shT);
 vec3 shP = shellPos(shD);
 vec3 objectNormal = normalize(cross(shellPos(normalize(shD + shT * 0.01)) - shP, shellPos(normalize(shD + shB * 0.01)) - shP));
 vShellDir = shD;
+vGoo = shP * 6.0;
+vGooJ0 = vec3(6.0, 0.0, 0.0);
+vGooJ1 = vec3(0.0, 6.0, 0.0);
+vGooJ2 = vec3(0.0, 0.0, 6.0);
+vGooAmp = 0.012;
+vGooDry = gooDryAt(vGoo);
+// a film lying on the body: the body shuts in most of what it would see
+vGooAO = 0.6;
 `)
       .replace('#include <begin_vertex>', 'vec3 transformed = shP;');
 

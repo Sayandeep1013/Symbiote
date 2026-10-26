@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { SEGS } from './tubes.js';
 import { BODY_R, radiusAt } from './rig.js';
 import { MASS } from './massConfig.js';
+import { GOO_VERTEX_PARS, patchGoo } from './goo.js';
 
 // One implicit surface for everything thick: the body, trunk roots, forks,
 // merges and loopers. Strands that come close fuse with a fillet, which is
@@ -22,7 +23,7 @@ const smoothstep = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 
-export function createMass(rig, material) {
+export function createMass(rig, material, gooU) {
   const strands = rig.tendrils.filter((t) => MASS_KINDS.has(t.kind));
   const maxSegs = strands.length * (SEGS - 1);
 
@@ -30,11 +31,35 @@ export function createMass(rig, material) {
   const maxVerts = MASS.MAX_POLYS * 3;
   const position = new THREE.BufferAttribute(new Float32Array(maxVerts * 3), 3);
   const normal = new THREE.BufferAttribute(new Float32Array(maxVerts * 3), 3);
+  const ao = new THREE.BufferAttribute(new Float32Array(maxVerts), 1);
   position.setUsage(THREE.DynamicDrawUsage);
   normal.setUsage(THREE.DynamicDrawUsage);
+  ao.setUsage(THREE.DynamicDrawUsage);
   geometry.setAttribute('position', position);
   geometry.setAttribute('normal', normal);
+  geometry.setAttribute('gooAO', ao);
   geometry.setDrawRange(0, 0);
+
+  material.onBeforeCompile = (shader) => {
+    patchGoo(shader, gooU);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+${GOO_VERTEX_PARS}
+attribute float gooAO;
+`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+// creature-space pattern, drifting slowly: the surface seems to crawl
+const float GOO_F = 4.5;
+vGoo = position * ${MASS.HALF.toFixed(1)} * GOO_F + vec3(0.0, uGooTime * 0.05, uGooTime * 0.03);
+vGooJ0 = vec3(GOO_F, 0.0, 0.0);
+vGooJ1 = vec3(0.0, GOO_F, 0.0);
+vGooJ2 = vec3(0.0, 0.0, GOO_F);
+vGooAmp = 0.016;
+vGooAO = gooAO;
+vGooDry = gooDryAt(vGoo);
+`)
+  };
+  material.customProgramCacheKey = () => 'symbiote-mass';
 
   const mesh = new THREE.Mesh(geometry, material);
   // the worker polygonizes in [-1, 1]
@@ -51,9 +76,10 @@ export function createMass(rig, material) {
     const d = e.data;
     position.array.set(d.positions);
     normal.array.set(d.normals);
-    for (const attr of [position, normal]) {
+    ao.array.set(d.ao);
+    for (const attr of [position, normal, ao]) {
       attr.clearUpdateRanges();
-      attr.addUpdateRange(0, d.count * 3);
+      attr.addUpdateRange(0, d.count * attr.itemSize);
       attr.needsUpdate = true;
     }
     geometry.setDrawRange(0, d.count);
@@ -68,8 +94,8 @@ export function createMass(rig, material) {
     let n = 0;
     strands.forEach((t, si) => {
       for (let k = 0; k < SEGS - 1; k++) {
-        const ra = radiusAt(t, k / (SEGS - 1));
-        const rb = radiusAt(t, (k + 1) / (SEGS - 1));
+        const ra = radiusAt(t, k / (SEGS - 1), time);
+        const rb = radiusAt(t, (k + 1) / (SEGS - 1), time);
         if (ra < MASS.R_MIN * 0.8 && rb < MASS.R_MIN * 0.8) break;
         const a = t.pts[k];
         const b = t.pts[k + 1];
