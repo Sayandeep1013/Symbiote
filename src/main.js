@@ -1,145 +1,182 @@
 import * as THREE from 'three';
-import vertexShader from './shaders/blob.vert.glsl?raw';
-import fragmentShader from './shaders/blob.frag.glsl?raw';
-
-const NUM_TENT = 14;
-const CORE_R = 0.85;
+import { createStudioEnvironment } from './creature/env.js';
+import { createTubes, SEGS } from './creature/tubes.js';
+import { createRig } from './creature/rig.js';
+import { createBody } from './creature/body.js';
+import { createWebbing } from './creature/webbing.js';
+import { createStage } from './creature/stage.js';
+import { createShell } from './creature/shell.js';
 
 const canvas = document.getElementById('canvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.3;
+renderer.setClearColor(0x000000, 0);
 
 const scene = new THREE.Scene();
-const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+scene.environment = createStudioEnvironment(renderer);
 
-const CAM_POS = new THREE.Vector3(0, 0, 7.5);
+const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.1, 50);
+camera.position.set(0, 0.6, 8.8);
+camera.lookAt(0, -0.1, 0);
 
-// Virtual camera used only for mouse raycasting math (matches the shader's
-// hand-rolled ray construction: fov 45deg, looking at the origin).
-const raycastCamera = new THREE.PerspectiveCamera(
-  45,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  100
-);
-raycastCamera.position.copy(CAM_POS);
-raycastCamera.lookAt(0, 0, 0);
-
-const mousePlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-const raycaster = new THREE.Raycaster();
-const mouseNDC = new THREE.Vector2(0, 0);
-const mouseWorld = new THREE.Vector3(0, 3, 0);
-const prevMouseWorld = mouseWorld.clone();
-let mouseSpeed = 0;
-
-// ---- per-tentacle static setup (fibonacci sphere directions) ----
-function fibDir(i, n) {
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  const y = 1 - (i / (n - 1)) * 2;
-  const radius = Math.sqrt(Math.max(0, 1 - y * y));
-  const theta = golden * i;
-  return new THREE.Vector3(Math.cos(theta) * radius, y, Math.sin(theta) * radius).normalize();
+// Wet black: almost no diffuse, a slightly rough base reflection under a
+// mirror-sharp clearcoat. Both layers reflect the strip-light studio, which
+// gives a soft sheen plus a crisp streak on every edge.
+function wetBlack() {
+  return new THREE.MeshPhysicalMaterial({
+    color: 0x030304,
+    roughness: 0.22,
+    metalness: 0.0,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.03,
+    envMapIntensity: 1.0,
+    iridescence: 0.15,
+    iridescenceIOR: 1.25,
+  });
 }
 
-// cheap smooth pseudo-noise (sum of a few sines) - stands in for the GLSL
-// simplex noise but runs 14x/frame on the CPU instead of ~2M times/frame on
-// the GPU across every raymarch step of every pixel
-function pnoise(t, seed) {
-  return (
-    Math.sin(t * 1.0 + seed * 12.9898) * 0.5 +
-    Math.sin(t * 2.13 + seed * 4.211) * 0.3 +
-    Math.sin(t * 3.71 + seed * 7.777) * 0.2
-  );
+const stage = createStage();
+scene.add(stage.mesh);
+
+const creature = new THREE.Group();
+scene.add(creature);
+
+const rig = createRig();
+const tubes = createTubes(rig.tendrils.length, wetBlack());
+creature.add(tubes.mesh);
+
+// the core is big smooth lobes that catch every strip at once; keep it
+// darker so it reads as a deep black mass under the brighter strands
+const bodyMaterial = wetBlack();
+bodyMaterial.envMapIntensity = 0.35;
+const body = createBody(bodyMaterial);
+creature.add(body.mesh);
+
+// thin films are nearly flat, so a mirror coat reflects whole light strips as
+// white blocks; a slightly softer coat keeps them as streaks
+function wetFilm() {
+  const m = wetBlack();
+  m.envMapIntensity = 0.55;
+  m.clearcoatRoughness = 0.14;
+  m.roughness = 0.3;
+  return m;
 }
 
-function smoothstep(edge0, edge1, x) {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
-  return t * t * (3 - 2 * t);
+// the webbing is the flattest surface of all: grazing reflections of the big
+// overhead strip turned whole sheets white, so it gets a much quieter coat
+const webMaterial = wetFilm();
+webMaterial.envMapIntensity = 0.28;
+webMaterial.clearcoat = 0.6;
+webMaterial.clearcoatRoughness = 0.22;
+const webbing = createWebbing(rig.pairs, tubes.posTex, webMaterial);
+creature.add(webbing.mesh);
+
+const shell = createShell(wetFilm());
+creature.add(shell.mesh);
+
+rig.tendrils.forEach((t, i) => {
+  tubes.shape[i * 4] = t.r0;
+  tubes.shape[i * 4 + 1] = t.r1;
+  tubes.shape[i * 4 + 2] = t.taper;
+  tubes.shape[i * 4 + 3] = t.flat;
+  tubes.extra[i * 2] = t.seed;
+  tubes.extra[i * 2 + 1] = t.bulge;
+});
+tubes.commit();
+
+// spines -> textures, with a rotation-minimising frame so the flattened
+// cross-sections twist smoothly instead of flipping
+const tan = new THREE.Vector3();
+const nrm = new THREE.Vector3();
+function uploadSpines() {
+  const P = tubes.posData;
+  const N = tubes.nrmData;
+  rig.tendrils.forEach((t, row) => {
+    const pts = t.pts;
+    for (let k = 0; k < SEGS; k++) {
+      const a = pts[Math.max(0, k - 1)];
+      const b = pts[Math.min(SEGS - 1, k + 1)];
+      tan.subVectors(b, a).normalize();
+      if (k === 0) nrm.copy(t.ref);
+      nrm.addScaledVector(tan, -nrm.dot(tan)).normalize();
+      const o = (row * SEGS + k) * 4;
+      P[o] = pts[k].x;
+      P[o + 1] = pts[k].y;
+      P[o + 2] = pts[k].z;
+      N[o] = nrm.x;
+      N[o + 1] = nrm.y;
+      N[o + 2] = nrm.z;
+    }
+  });
+  tubes.upload();
 }
-
-const tentDirs = Array.from({ length: NUM_TENT }, (_, i) => fibDir(i, NUM_TENT));
-const tentBaseVals = tentDirs.map((d) => d.clone().multiplyScalar(CORE_R * 0.72));
-const tentTipVals = Array.from({ length: NUM_TENT }, () => new THREE.Vector3());
-
-const uniforms = {
-  uTime: { value: 0 },
-  uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-  uCamPos: { value: CAM_POS },
-  uTentBase: { value: tentBaseVals },
-  uTentTip: { value: tentTipVals },
-};
-
-const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms });
-const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
-scene.add(quad);
 
 function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h);
-  uniforms.uResolution.value.set(w, h);
-  raycastCamera.aspect = w / h;
-  raycastCamera.updateProjectionMatrix();
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
 resize();
 
+// ---------- cursor as a 3D stimulus ----------
+const pointerNDC = new THREE.Vector2();
+let pointerSeen = false;
+let pointerInside = false;
 window.addEventListener('pointermove', (e) => {
-  mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
-  mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  pointerNDC.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  pointerSeen = true;
+  pointerInside = true;
+});
+document.addEventListener('pointerout', (e) => {
+  if (!e.relatedTarget) pointerInside = false;
 });
 
-const clock = new THREE.Clock();
-const hitPoint = new THREE.Vector3();
-const toMouse = new THREE.Vector3();
-const wobble = new THREE.Vector3();
+const raycaster = new THREE.Raycaster();
+const cursorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const cursorWorld = new THREE.Vector3();
+const prevCursorWorld = new THREE.Vector3();
+const cursor = { pos: new THREE.Vector3(), speed: 0, active: false };
 
-function updateTentacles(time) {
-  toMouse.copy(mouseWorld).normalize();
-  const proximity = smoothstep(3.2, 0.0, mouseWorld.length());
-  const flinchAmt = smoothstep(0.25, 1.6, mouseSpeed);
-
-  for (let i = 0; i < NUM_TENT; i++) {
-    const dir = tentDirs[i];
-
-    const idle = pnoise(time * 0.4, i);
-    let len = 0.4 + 0.32 * idle;
-
-    const facing = Math.max(0, dir.dot(toMouse));
-    const reach = facing * proximity;
-    const flinch = flinchAmt * facing;
-    len += reach * 0.55 - flinch * 0.4;
-    len = Math.min(1.05, Math.max(0.1, len));
-
-    wobble.set(
-      pnoise(time * 0.55 + 11, i),
-      pnoise(time * 0.55 + 31, i),
-      pnoise(time * 0.55 + 51, i)
-    ).multiplyScalar(0.28);
-
-    tentTipVals[i].copy(dir).add(wobble).normalize().multiplyScalar(CORE_R + len);
-  }
+function updateCursor(dt) {
+  cursor.active = pointerSeen && pointerInside;
+  if (!pointerSeen) return;
+  raycaster.setFromCamera(pointerNDC, camera);
+  // plane through the creature's centre, facing the camera
+  cursorPlane.constant = -creature.position.z;
+  if (!raycaster.ray.intersectPlane(cursorPlane, cursorWorld)) return;
+  const inst = cursorWorld.distanceTo(prevCursorWorld) / Math.max(dt, 1e-3);
+  cursor.speed += (inst - cursor.speed) * 0.2;
+  prevCursorWorld.copy(cursorWorld);
+  creature.updateMatrixWorld();
+  cursor.pos.copy(cursorWorld);
+  creature.worldToLocal(cursor.pos);
 }
+
+const clock = new THREE.Clock();
 
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   const time = clock.elapsedTime;
 
-  raycaster.setFromCamera(mouseNDC, raycastCamera);
-  const hit = raycaster.ray.intersectPlane(mousePlane, hitPoint);
-  if (hit) {
-    mouseWorld.lerp(hit, 0.18);
-  }
+  // slow sway (not a spin: the crown would turn edge-on) so the studio
+  // reflections crawl over the surface
+  creature.rotation.y = Math.sin(time * 0.11) * 0.35;
+  creature.rotation.x = Math.sin(time * 0.17) * 0.12;
+  creature.position.y = 0.25 + Math.sin(time * 0.6) * 0.06;
 
-  const instSpeed = mouseWorld.distanceTo(prevMouseWorld) / Math.max(dt, 0.001);
-  mouseSpeed += (instSpeed - mouseSpeed) * 0.15;
-  prevMouseWorld.copy(mouseWorld);
+  updateCursor(dt);
+  rig.update(dt, time, cursor);
+  uploadSpines();
+  body.update(time);
+  shell.update(time);
+  stage.update(time);
 
-  updateTentacles(time);
-
-  uniforms.uTime.value = time;
-
-  renderer.render(scene, quadCamera);
+  renderer.render(scene, camera);
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
